@@ -1,84 +1,178 @@
----
-- name: Configure Blinkit Jenkins + Docker server
+- name: Configure Blinkit server — Jenkins + Docker
   hosts: jenkins_server
   become: true
 
+  vars:
+    jenkins_home: /var/lib/jenkins
+    jenkins_war:  /opt/jenkins/jenkins.war
+    jenkins_port: 8080
+
   tasks:
+
+    # ── SYSTEM ────────────────────────────────────────────────
+    - name: Remove broken Jenkins apt repo if present
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/jenkins.list
+        - /usr/share/keyrings/jenkins-keyring.asc
+        - /usr/share/keyrings/jenkins-keyring.gpg
 
     - name: Update apt cache
       apt:
-        update_cache: true
+        update_cache: yes
 
+    - name: Install system dependencies
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - unzip
+          - gnupg
+          - ca-certificates
+          - apt-transport-https
+          - software-properties-common
+        state: present
+
+    # ── JAVA ──────────────────────────────────────────────────
     - name: Install Java 17
       apt:
         name: openjdk-17-jdk
         state: present
 
-    - name: Install required dependencies
-      apt:
-        name:
-          - curl
-          - gnupg
-          - ca-certificates
-        state: present
+    - name: Verify Java
+      command: java -version
+      register: java_check
+      changed_when: false
 
-    - name: Add Jenkins GPG key
+    # ── JENKINS via WAR (bypasses broken apt repo) ────────────
+    - name: Create Jenkins WAR directory
+      file:
+        path: /opt/jenkins
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create Jenkins home directory
+      file:
+        path: "{{ jenkins_home }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Download Jenkins WAR file
       get_url:
-        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-        dest: /usr/share/keyrings/jenkins-keyring.asc
+        url: https://get.jenkins.io/war-stable/latest/jenkins.war
+        dest: "{{ jenkins_war }}"
+        owner: ubuntu
+        group: ubuntu
         mode: '0644'
+        timeout: 120
 
-    - name: Add Jenkins apt repository
-      apt_repository:
-        repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
-        state: present
-        filename: jenkins
+    - name: Deploy Jenkins systemd service
+      copy:
+        dest: /etc/systemd/system/jenkins.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Jenkins Automation Server
+          After=network.target
 
-    - name: Install Jenkins
-      apt:
-        name: jenkins
-        state: present
-        update_cache: true
+          [Service]
+          Type=simple
+          User=ubuntu
+          Group=ubuntu
+          WorkingDirectory=/opt/jenkins
+          Environment="JENKINS_HOME={{ jenkins_home }}"
+          ExecStart=/usr/bin/java -jar {{ jenkins_war }} --httpPort={{ jenkins_port }}
+          SuccessExitStatus=143
+          Restart=on-failure
+          RestartSec=15
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
 
     - name: Start and enable Jenkins
       systemd:
         name: jenkins
         state: started
-        enabled: true
+        enabled: yes
 
-    - name: Install Docker
+    - name: Wait for Jenkins to become ready (up to 90 seconds)
+      wait_for:
+        port: "{{ jenkins_port }}"
+        host: 0.0.0.0
+        delay: 20
+        timeout: 90
+        msg: "Jenkins did not start on port {{ jenkins_port }}"
+
+    # ── DOCKER ────────────────────────────────────────────────
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+        gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/docker-archive-keyring.gpg
+
+    - name: Add Docker apt repository (noble = Ubuntu 24.04)
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable
+        mode: '0644'
+
+    - name: Update apt cache after Docker repo
       apt:
-        name: docker.io
+        update_cache: yes
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
         state: present
 
     - name: Start and enable Docker
       systemd:
         name: docker
         state: started
-        enabled: true
-
-    - name: Add jenkins user to docker group
-      user:
-        name: jenkins
-        groups: docker
-        append: true
+        enabled: yes
 
     - name: Add ubuntu user to docker group
       user:
         name: ubuntu
         groups: docker
-        append: true
+        append: yes
 
-    - name: Restart Jenkins to apply docker group
-      systemd:
-        name: jenkins
-        state: restarted
+    # ── VERIFY ────────────────────────────────────────────────
+    - name: Verify Docker works
+      command: docker --version
+      register: docker_ver
+      changed_when: false
 
-    - name: Install Git
-      apt:
-        name: git
-        state: present
+    - name: Get Jenkins initial admin password
+      slurp:
+        src: "{{ jenkins_home }}/secrets/initialAdminPassword"
+      register: jenkins_password
+      ignore_errors: true
 
-    - name: Print Jenkins initial admin password location
+    - name: Print summary
       debug:
-        msg: "Run: sudo cat /var/lib/jenkins/secrets/initialAdminPassword on EC2 to get the Jenkins password"
+        msg:
+          - "Java    : {{ java_check.stderr }}"
+          - "Docker  : {{ docker_ver.stdout }}"
+          - "Jenkins : http://{{ ansible_host }}:{{ jenkins_port }}"
+          - "Password: {{ jenkins_password.content | default('still booting — check in 60s') | b64decode | trim }}"

@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE   = "YOUR_DOCKERHUB_USERNAME/blinkit-app"
+        DOCKER_IMAGE   = "nitesh1508/blinkit-app"
         DOCKER_TAG     = "latest"
         CONTAINER_NAME = "blinkit-container"
         APP_PORT       = "80"
