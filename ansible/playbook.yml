@@ -1,0 +1,84 @@
+---
+- name: Configure Blinkit Jenkins + Docker server
+  hosts: jenkins_server
+  become: true
+
+  tasks:
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+
+    - name: Install Java 17
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Install required dependencies
+      apt:
+        name:
+          - curl
+          - gnupg
+          - ca-certificates
+        state: present
+
+    - name: Add Jenkins GPG key
+      get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: '0644'
+
+    - name: Add Jenkins apt repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+        state: present
+        filename: jenkins
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: true
+
+    - name: Start and enable Jenkins
+      systemd:
+        name: jenkins
+        state: started
+        enabled: true
+
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add jenkins user to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: true
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    - name: Restart Jenkins to apply docker group
+      systemd:
+        name: jenkins
+        state: restarted
+
+    - name: Install Git
+      apt:
+        name: git
+        state: present
+
+    - name: Print Jenkins initial admin password location
+      debug:
+        msg: "Run: sudo cat /var/lib/jenkins/secrets/initialAdminPassword on EC2 to get the Jenkins password"
